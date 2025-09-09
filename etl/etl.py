@@ -228,7 +228,7 @@ def login():
         resp = requests.get(url, params=params, headers={"Accept": "application/json"}, timeout=30)
     elif method == "POST_FORM":
         resp = requests.post(url, data=params, headers={"Accept": "application/json"}, timeout=30)
-    else:  # POST_PARAMS
+    else:
         resp = requests.post(url, params=params, headers={"Accept": "application/json"}, timeout=30)
 
     if not (200 <= resp.status_code < 300):
