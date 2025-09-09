@@ -1,6 +1,7 @@
 .env*
 docker/db/data
 powerbi
+.gitignore
 
 
 
