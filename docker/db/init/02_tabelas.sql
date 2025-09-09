@@ -1,4 +1,3 @@
--- Veículos (empresa direto aqui)
 CREATE TABLE IF NOT EXISTS cadastro.veiculo (
   placa TEXT PRIMARY KEY,
   empresa TEXT,
@@ -8,7 +7,6 @@ CREATE TABLE IF NOT EXISTS cadastro.veiculo (
   criado_em TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Posições (campos conforme o ETL usa)
 CREATE TABLE IF NOT EXISTS rastreio.posicao (
   id_position BIGINT PRIMARY KEY,
   placa TEXT NOT NULL REFERENCES cadastro.veiculo(placa),
@@ -19,7 +17,6 @@ CREATE TABLE IF NOT EXISTS rastreio.posicao (
   data_atualizacao TIMESTAMPTZ,
   latitude DOUBLE PRECISION NOT NULL,
   longitude DOUBLE PRECISION NOT NULL,
-  -- Se quiser PostGIS, descomente as duas abaixo:
   geom geometry(Point, 4326)
   GENERATED ALWAYS AS (ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)) STORED,
   inputs JSONB,
@@ -33,7 +30,6 @@ CREATE INDEX IF NOT EXISTS idx_posicao_placa_evento
   CREATE INDEX IF NOT EXISTS idx_posicao_geom
   ON rastreio.posicao USING GIST (geom);
 
--- Eventos de tanque (que o ETL grava)
 CREATE TABLE IF NOT EXISTS operacao.evento_tanque (
   id_evento BIGSERIAL PRIMARY KEY,
   placa TEXT NOT NULL REFERENCES cadastro.veiculo(placa),
@@ -51,11 +47,9 @@ CREATE TABLE IF NOT EXISTS operacao.evento_tanque (
 CREATE INDEX IF NOT EXISTS idx_evento_tanque_placa_data
   ON operacao.evento_tanque (placa, data_hora DESC);
 
--- Índice espacial (sem PostGIS) para consulta por raio:
 CREATE INDEX IF NOT EXISTS idx_evento_tanque_earth
   ON operacao.evento_tanque USING gist (ll_to_earth(latitude, longitude));
 
--- Sessões de COLETA/DESCARGA com início/fim
 CREATE TABLE IF NOT EXISTS operacao.sessao_tanque (
   id_sessao BIGSERIAL PRIMARY KEY,
   placa TEXT NOT NULL REFERENCES cadastro.veiculo(placa),

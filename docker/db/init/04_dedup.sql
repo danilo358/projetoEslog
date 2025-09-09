@@ -1,5 +1,3 @@
--- Função: registra evento apenas se NÃO houver outro do mesmo tipo,
--- MESMA PLACA, dentro do RAIO (m) e da JANELA DE TEMPO (min).
 CREATE OR REPLACE FUNCTION operacao.registrar_evento_tanque_if_new(
     p_placa          text,
     p_tipo           text,
@@ -20,7 +18,7 @@ DECLARE
     ja_existe boolean;
 BEGIN
     IF p_lat IS NULL OR p_lon IS NULL THEN
-        RETURN FALSE; -- sem coordenada, não registra
+        RETURN FALSE;
     END IF;
 
     SELECT EXISTS (
@@ -44,11 +42,10 @@ BEGIN
       (p_placa, p_tipo, p_data_hora, p_lat, p_lon, p_variacao, p_nivel_ant, p_nivel_atu, p_origem_posicao)
     ON CONFLICT (origem_posicao) DO NOTHING;
 
-    RETURN FOUND; -- TRUE se inseriu
+    RETURN FOUND;
 END;
 $$;
 
--- Volume estimado (em litros) respeitando o sentido
 CREATE OR REPLACE FUNCTION operacao._calc_volume(cap_l NUMERIC, tipo TEXT, ini NUMERIC, fim NUMERIC)
 RETURNS NUMERIC
 LANGUAGE SQL
@@ -62,8 +59,6 @@ AS $$
          END
 $$;
 
--- SUBSTITUI a sua função atual (mesmo nome/assinatura):
--- continua registrando o evento pontual (com dedupe) e passa a abrir/estender uma sessão.
 CREATE OR REPLACE FUNCTION operacao.registrar_evento_tanque_if_new(
     p_placa          text,
     p_tipo           text,
@@ -92,7 +87,6 @@ BEGIN
         RETURN FALSE;
     END IF;
 
-    -- 1) Dedupe do evento pontual
     SELECT EXISTS (
         SELECT 1
           FROM operacao.evento_tanque e
@@ -112,7 +106,6 @@ BEGIN
         ON CONFLICT (origem_posicao) DO NOTHING;
     END IF;
 
-    -- 2) Sessão: abrir/estender
     SELECT capacidade_tanque_litros INTO cap_l
       FROM cadastro.veiculo WHERE placa = p_placa;
 
@@ -175,7 +168,6 @@ BEGIN
 END;
 $$;
 
--- "Tocar" sessão com cada posição (mesmo sem nova variação)
 CREATE OR REPLACE FUNCTION operacao.touch_sessao_tanque(
     p_placa        text,
     p_data_hora    timestamptz,
@@ -232,7 +224,7 @@ BEGIN
 END;
 $$;
 
--- View para o BI: só sessões finalizadas, com duração em segundos
+
 CREATE OR REPLACE VIEW operacao.vw_sessoes_tanque AS
 SELECT
   s.*,
@@ -240,7 +232,6 @@ SELECT
 FROM operacao.sessao_tanque s
 WHERE s.status = 'FECHADA';
 
--- fecha 1 sessão: calcula variação/volume, marca FECHADA e grava o evento FINAL
 CREATE OR REPLACE FUNCTION operacao._fechar_sessao(p_id_sessao BIGINT)
 RETURNS boolean
 LANGUAGE plpgsql
@@ -274,7 +265,7 @@ BEGIN
 END;
 $$;
 
--- fecha todas as sessões "paradas" (sem toques recentes) e retorna quantas fechou
+
 CREATE OR REPLACE FUNCTION operacao.fechar_sessoes_stagnadas(p_gap_min integer DEFAULT 30)
 RETURNS integer
 LANGUAGE plpgsql
@@ -297,7 +288,6 @@ BEGIN
 END;
 $$;
 
--- (opcional) ajuda a varredura de sessões para fechamento
 CREATE INDEX IF NOT EXISTS idx_sessao_aberta_fim
   ON operacao.sessao_tanque (fim_data_hora)
   WHERE status='ABERTA' AND fim_data_hora IS NOT NULL;
@@ -311,8 +301,8 @@ DECLARE
   s RECORD;
   variacao_pp NUMERIC;
   dur_sec BIGINT;
-  min_dur INT := 120;   -- mesma semântica de OP_MIN_DURATION_SEC
-  min_pts INT := 3;     -- mesma semântica de OP_MIN_SAMPLES
+  min_dur INT := 120; 
+  min_pts INT := 3;
 BEGIN
   SELECT * INTO s FROM operacao.sessao_tanque WHERE id_sessao = p_id_sessao FOR UPDATE;
   IF NOT FOUND OR s.fim_pos_id IS NULL OR s.fim_data_hora IS NULL THEN
@@ -322,7 +312,6 @@ BEGIN
   dur_sec := EXTRACT(EPOCH FROM (s.fim_data_hora - s.inicio_data_hora))::bigint;
   variacao_pp := abs(COALESCE(s.fim_nivel,0) - COALESCE(s.inicio_nivel,0));
 
-  -- Qualificação mínima: duração e nº de pontos
   IF (dur_sec < min_dur) OR (COALESCE(s.pontos_validos,0) < min_pts) THEN
     UPDATE operacao.sessao_tanque
        SET status='DESCARTADA', atualizado_em = now()
@@ -330,7 +319,6 @@ BEGIN
     RETURN FALSE;
   END IF;
 
-  -- Sessão válida -> fechar + evento final agregado
   UPDATE operacao.sessao_tanque
      SET status='FECHADA',
          volume_estimado_l = operacao._calc_volume(

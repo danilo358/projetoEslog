@@ -18,15 +18,15 @@ load_dotenv()
 
 # ====================== Configs de ambiente ======================
 API_BASE_URL = os.getenv("API_BASE_URL")
-CLIENT_INTEGRATION_CODE = os.getenv("CLIENT_INTEGRATION_CODE")  # usado no body
+CLIENT_INTEGRATION_CODE = os.getenv("CLIENT_INTEGRATION_CODE")
 AUTH_LOGIN_PATH = os.getenv("AUTH_LOGIN_PATH")
 AUTH_USER = os.getenv("AUTH_USER")
-RADIUS_M = int(os.getenv("EVENT_RADIUS_METERS"))
+RADIUS_M = int(os.getenv("EVENT_RADIUS_METERS", 50))
 COOLDOWN_MIN = os.getenv("EVENT_COOLDOWN_MIN")
 COOLDOWN_MIN = int(COOLDOWN_MIN) if (COOLDOWN_MIN not in (None, "")) else None
 AUTH_PASS = os.getenv("AUTH_PASS")
 AUTH_HASH = os.getenv("AUTH_HASH")
-GET_LAST_POSITIONS_PATH = os.getenv("GET_LAST_POSITIONS_PATH")  # /Controlws/HistoryPosition/List
+GET_LAST_POSITIONS_PATH = os.getenv("GET_LAST_POSITIONS_PATH")
 
 DB_HOST = os.getenv("DB_HOST", "postgres")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
@@ -35,7 +35,6 @@ DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
 API_PAGE_MAX = int(os.getenv("API_PAGE_MAX", "80000"))
 
-# IMPORTANTE: agora TOLERANCIA é um LIMIAR ABSOLUTO em pp (ex.: 10 = 10 pontos percentuais)
 TOLERANCIA = Decimal(os.getenv("TOLERANCIA_VARIACAO_PERCENT", "10"))
 FREQUENCIA = int(os.getenv("FREQUENCIA_SEGUNDOS", "300"))
 
@@ -54,9 +53,21 @@ with open(os.path.join(os.path.dirname(__file__), "config.yml"), "r", encoding="
 
 # ====================== Utilitários ======================
 def obter_conexao():
-    return psycopg2.connect(
+    url = os.getenv("DATABASE_URL")
+    sslmode = os.getenv("DB_SSLMODE", None)
+
+    if url:
+        # Se quiser forçar SSL mesmo sem querystring no URL:
+        # return psycopg2.connect(dsn=url, sslmode="require")
+        return psycopg2.connect(dsn=url)
+
+    kwargs = dict(
         host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASS
     )
+    if sslmode:
+        kwargs["sslmode"] = sslmode  # ex.: 'require'
+    return psycopg2.connect(**kwargs)
+
 
 def _inicio_do_dia_utc() -> datetime:
     now = datetime.now(timezone.utc)
@@ -84,7 +95,6 @@ def api_list_positions(placa: str, dt_ini: datetime, dt_fim: datetime, headers: 
     resp.raise_for_status()
     itens = resp.json() or []
 
-    # Garante só a placa alvo
     filtrados = []
     for it in itens:
         tu = str(it.get("TrackedUnit") or "").strip()
@@ -92,7 +102,6 @@ def api_list_positions(placa: str, dt_ini: datetime, dt_fim: datetime, headers: 
         if placa in (tu, tiu):
             filtrados.append(it)
 
-    # Se parece que a API cortou a lista, fatiamos a janela
     if len(filtrados) >= API_PAGE_MAX and (dt_fim - dt_ini).total_seconds() > 1:
         meio = _midpoint(dt_ini, dt_fim)
         left  = api_list_positions(placa, dt_ini, meio, headers, url)
@@ -135,18 +144,15 @@ def janela_parada_ok(win: deque) -> bool:
     if (t_fim - t_ini).total_seconds() < OP_STATIONARY_MIN * 60:
         return False
 
-    # velocidade
     for p in win:
         v = p["vel"]
         if (v is not None) and (v > OP_IDLE_SPEED_KMH):
             return False
 
-    # deslocamento entre extremos
     d = haversine_m(win[0]["lat"], win[0]["lon"], win[-1]["lat"], win[-1]["lon"])
     return d <= OP_IDLE_RADIUS_M
 
 def variacao_em_pp(win: deque) -> Decimal | None:
-    """Diferença (último - primeiro) em pp, usando níveis não nulos."""
     n0 = None
     for p in win:
         if p["nivel"] is not None:
@@ -204,7 +210,7 @@ def _build_url(base: str, path: str) -> str:
 # ====================== Auth ======================
 def login():
     base = (API_BASE_URL or "").rstrip("/")
-    path = (AUTH_LOGIN_PATH or "/Login/Login").lstrip("/")
+    path = (AUTH_LOGIN_PATH or "/Login").lstrip("/")
     url = f"{base}/{path}"
 
     q_user_key = os.getenv("AUTH_QUERY_USER_KEY", "Username")
@@ -294,7 +300,6 @@ def obter_ultimos_niveis_antes(cur, placa: str, data_corte: str, limite: int = 1
          LIMIT %s;
     """, (placa, data_corte, limite))
     rows = cur.fetchall()
-    # rows vem DESC; inverter para ASC e converter para Decimal
     return [Decimal(str(r[0])) for r in rows[::-1]]
 
 def obter_ultima_posicao_com_nivel(cur, placa: str):
@@ -324,7 +329,6 @@ def inserir_evento_tanque(cur, placa, tipo, data_hora, lat, lon, variacao_pp, ni
         RADIUS_M,
         COOLDOWN_MIN
     ))
-    # opcional: ok = cur.fetchone()[0]
 
 
 def inserir_posicoes(cur, linhas):
@@ -393,7 +397,7 @@ def coletar_e_gravar():
                         continue
 
                     telemetria = item.get("ListTelemetry") or {}
-                    nivel = extrair_nivel_tanque(telemetria, placa)  # SOMENTE 304
+                    nivel = extrair_nivel_tanque(telemetria, placa)
 
                     candidatos.append({
                         "id_position": idp,
@@ -469,7 +473,6 @@ def coletar_e_gravar():
             logging.info(f"[{p}] novas inseridas: {q}")
 
         # ===== Geração de eventos de tanque =====
-         # ===== DETECÇÃO ROBUSTA: parado + variação sustentada =====
         eventos_criados = 0
 
         # Agrupa por placa

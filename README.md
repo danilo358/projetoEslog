@@ -1,10 +1,9 @@
-BI Meio Ambiente — Coleta de Posições, Eventos e Sessões (README)
+===============================================================
 
-Este projeto cria um pipeline simples de telemetria com PostgreSQL/PostGIS, ETL em Python e pgAdmin, pronto para consumo no Qlik.
-
-===============================================================================
 Visão geral
-===============================================================================
+
+===============================================================
+
 - Banco: PostgreSQL 16 + extensões postgis, cube e earthdistance.
 - ETL: Python 3.12 dentro de container, consulta a API (SystemSat) e grava:
   - Histórico completo em rastreio.posicao.
@@ -16,16 +15,22 @@ Visão geral
 - Qlik: lê cadastro.veiculo, rastreio.v_ultima_posicao, operacao.evento_tanque e
   (opcional) operacao.vw_sessoes_tanque.
 
-===============================================================================
+===============================================================
+
 Arquitetura dos containers
-===============================================================================
+
+===============================================================
+
 - pg-bi-meio-ambiente – Postgres + PostGIS (porta host 5433 → container 5432).
 - pgadmin-bi-meio-ambiente – pgAdmin (porta host 8081 → container 80).
 - etl-bi-meio-ambiente – Processo cíclico que autentica, baixa posições e grava no banco.
 
-===============================================================================
+===============================================================
+
 Estrutura de schemas e tabelas
-===============================================================================
+
+===============================================================
+
 Criadas pelos scripts em db/init na primeira subida do banco:
 
 - cadastro.veiculo – cadastro de placas/empresa/capacidade.
@@ -38,9 +43,12 @@ Views:
 - rastreio.vw_ultimas_posicoes_detalhe – alias compatível para a mesma view.
 - operacao.vw_sessoes_tanque – somente sessões fechadas, com duracao_seg.
 
-===============================================================================
-Funções PL/pgSQL (resumo)
-===============================================================================
+===============================================================
+
+Funções PL/pgSQL
+
+===============================================================
+
 - operacao.registrar_evento_tanque_if_new(...)
   Deduplica e grava evento pontual e abre/estende uma sessão ativa.
 
@@ -53,9 +61,12 @@ Funções PL/pgSQL (resumo)
 - operacao._calc_volume(cap_l, tipo, ini, fim)
   Converte variação % em litros respeitando o sentido (coleta vs descarga).
 
-===============================================================================
+===============================================================
+
 Variáveis de ambiente (arquivo docker/.env)
-===============================================================================
+
+===============================================================
+
 - POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB: credenciais/DB do Postgres.
 - PGADMIN_DEFAULT_EMAIL, PGADMIN_DEFAULT_PASSWORD: login do pgAdmin.
 - API_BASE_URL: base da API (SystemSat).
@@ -71,9 +82,12 @@ Variáveis de ambiente (arquivo docker/.env)
 
 Importante (segurança): não faça commit de .env com credenciais reais. Use o etl/.env.example como referência.
 
-===============================================================================
+===============================================================
+
 Como subir o ambiente
-===============================================================================
+
+===============================================================
+
 Pré-requisitos:
 - Docker e Docker Compose instalados.
 
@@ -93,13 +107,16 @@ Pré-requisitos:
   Cadastre a conexão em Servers → host postgres, porta 5432, usuário POSTGRES_USER, DB POSTGRES_DB.
 - Postgres: host localhost, porta 5433 (mapeada), DB POSTGRES_DB.
 
-===============================================================================
-Como o ETL funciona (passo a passo)
-===============================================================================
+===============================================================
+
+Como o ETL funciona
+
+===============================================================
+
 1. Login na API e guarda o token.
 2. Para cada placa ativa em cadastro.veiculo:
    - Busca no banco a última data_evento da placa.
-   - Se não existir registro, usa início do mês UTC como StartDatePosition.
+   - Se não existir registro, usa uma data de início padrão (atualmente, o início do dia 1 do mês corrente em UTC, conforme `_inicio_do_dia_utc` no ETL).
    - Monta a janela [dt_ini, agora]. Se a API “cortar” resultados (≥ API_PAGE_MAX),
      o ETL divide recursivamente a janela em metades e soma os resultados.
    - Filtra somente posições da placa.
@@ -107,20 +124,28 @@ Como o ETL funciona (passo a passo)
 4. Ordena por data_evento ASC e insere em rastreio.posicao.
 5. Para cada posição inserida, chama operacao.touch_sessao_tanque(...) para abrir/estender
    uma sessão próxima no espaço/tempo.
-6. Compara o nível de tanque com valores anteriores para detectar variação ≥ limiar e
-   chama operacao.registrar_evento_tanque_if_new(...) (dedupe + sessão).
-7. Ao final do ciclo, executa operacao.fechar_sessoes_stagnadas(EVENT_COOLDOWN_MIN) para
-   fechar sessões inativas e gravar o evento final.
+6. Para cada nova posição (na ordem cronológica), o ETL:
+   a. Atualiza uma janela deslizante de pontos recentes (ex: últimos 2 minutos).
+   b. Se a janela indica que o veículo está parado e a variação de nível do tanque (entre o primeiro e o último ponto da janela) excede a tolerância, chama `operacao.registrar_evento_tanque_if_new(...)`. Esta função abre uma nova sessão de 'COLETA' ou 'DESCARGA' ou estende uma sessão já aberta no mesmo local.
+   c. Para cada ponto, também chama `operacao.touch_sessao_tanque(...)` para manter a sessão "viva", atualizando seu horário de fim.
+7. Ao final do ciclo, executa `operacao.fechar_sessoes_stagnadas(EVENT_COOLDOWN_MIN)` para
+   fechar sessões que não recebem atualizações há algum tempo. A função de fechamento também qualifica a sessão: se for muito curta ou tiver poucos pontos de medição, é marcada como `DESCARTADA`; caso contrário, é `FECHADA` e um `evento_tanque` final é gerado para representar a operação completa.
 8. Repete a cada FREQUENCIA_SEGUNDOS.
 
-Nota sobre lotes grandes (ex.: 1000 posições):
-Como as posições são inseridas em ordem cronológica, as funções de sessão são invocadas
-também na ordem certa, garantindo que toda a operação contínua seja agrupada em uma única
-sessão com volume total e duração corretos, mesmo que o veículo tenha ficado sem sinal por um tempo.
+**Nota sobre a qualificação de sessões:** Os limiares para descartar uma sessão (duração mínima e pontos mínimos) são definidos pelas variáveis `OP_MIN_DURATION_SEC` e `OP_MIN_SAMPLES` no ETL, mas seus valores estão atualmente **hardcoded** na função `operacao._fechar_sessao` no SQL. Se alterar as variáveis de ambiente, lembre-se de atualizar a função no banco de dados.
 
-===============================================================================
+Nota sobre lotes grandes (ex.: 1000 posições):
+Como as posições são processadas em ordem cronológica, as funções de sessão são invocadas
+também na ordem certa. Isso garante que uma operação contínua (uma única coleta ou descarga)
+seja agrupada em uma única sessão com volume total e duração corretos, mesmo que o veículo
+tenha ficado sem sinal por um tempo e os dados cheguem em um lote grande.
+
+===============================================================
+
 Integração com Qlik
-===============================================================================
+
+===============================================================
+
 O script atual do Qlik pode continuar igual para:
 - cadastro.veiculo
 - rastreio.v_ultima_posicao (ou rastreio.vw_ultimas_posicoes_detalhe)
@@ -133,18 +158,24 @@ coleta/descarga, volume estimado em litros e início/fim:
 
 A view já traz duracao_seg calculado. Se quiser enriquecer no Qlik (formatações, buckets de duração etc.), faça no script do próprio Qlik.
 
-===============================================================================
+===============================================================
+
 Operação do dia a dia
-===============================================================================
+
+===============================================================
+
 - Ver logs do ETL:
     docker logs -f etl-bi-meio-ambiente
 
 - Rodar SQL manualmente (pós-subida):
   Use o pgAdmin ou psql para reexecutar qualquer arquivo de db/init caso tenha feito alterações.
 
-===============================================================================
+===============================================================
+
 Dicas e solução de problemas
-===============================================================================
+
+===============================================================
+
 - “function ll_to_earth(...) does not exist”
   Certifique-se de que cube e earthdistance são criadas antes das tabelas/índices que as usam.
   Isso já é feito em 01_schemas.sql. Se você ressubiu parcialmente, rode:
@@ -162,9 +193,12 @@ Dicas e solução de problemas
 - Time zone
   Tudo é gravado com TIMESTAMPTZ em UTC. Ajustes de exibição devem ser feitos no BI.
 
-===============================================================================
-(OPTIONAL) Política de retenção
-===============================================================================
+===============================================================
+
+Política de retenção
+
+===============================================================
+
 Se desejar limitar a tabela de posições por placa (ex.: manter somente os N registros mais recentes),
 é possível criar uma tarefa programada (cron/pgAgent) com SQL como:
 
