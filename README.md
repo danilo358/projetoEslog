@@ -1,7 +1,3 @@
-BI Meio Ambiente — Coleta de Posições, Eventos e Sessões (README)
-
-Este projeto cria um pipeline simples de telemetria com PostgreSQL/PostGIS, ETL em Python e pgAdmin, pronto para consumo no Qlik.
-
 ===============================================================================
 Visão geral
 ===============================================================================
