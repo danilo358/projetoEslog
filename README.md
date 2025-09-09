@@ -1,6 +1,9 @@
 ===============================================================================
+
 Visão geral
+
 ===============================================================================
+
 - Banco: PostgreSQL 16 + extensões postgis, cube e earthdistance.
 - ETL: Python 3.12 dentro de container, consulta a API (SystemSat) e grava:
   - Histórico completo em rastreio.posicao.
@@ -13,15 +16,21 @@ Visão geral
   (opcional) operacao.vw_sessoes_tanque.
 
 ===============================================================================
+
 Arquitetura dos containers
+
 ===============================================================================
+
 - pg-bi-meio-ambiente – Postgres + PostGIS (porta host 5433 → container 5432).
 - pgadmin-bi-meio-ambiente – pgAdmin (porta host 8081 → container 80).
 - etl-bi-meio-ambiente – Processo cíclico que autentica, baixa posições e grava no banco.
 
 ===============================================================================
+
 Estrutura de schemas e tabelas
+
 ===============================================================================
+
 Criadas pelos scripts em db/init na primeira subida do banco:
 
 - cadastro.veiculo – cadastro de placas/empresa/capacidade.
@@ -35,8 +44,11 @@ Views:
 - operacao.vw_sessoes_tanque – somente sessões fechadas, com duracao_seg.
 
 ===============================================================================
-Funções PL/pgSQL (resumo)
+
+Funções PL/pgSQL
+
 ===============================================================================
+
 - operacao.registrar_evento_tanque_if_new(...)
   Deduplica e grava evento pontual e abre/estende uma sessão ativa.
 
@@ -50,8 +62,11 @@ Funções PL/pgSQL (resumo)
   Converte variação % em litros respeitando o sentido (coleta vs descarga).
 
 ===============================================================================
+
 Variáveis de ambiente (arquivo docker/.env)
+
 ===============================================================================
+
 - POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB: credenciais/DB do Postgres.
 - PGADMIN_DEFAULT_EMAIL, PGADMIN_DEFAULT_PASSWORD: login do pgAdmin.
 - API_BASE_URL: base da API (SystemSat).
@@ -68,8 +83,11 @@ Variáveis de ambiente (arquivo docker/.env)
 Importante (segurança): não faça commit de .env com credenciais reais. Use o etl/.env.example como referência.
 
 ===============================================================================
+
 Como subir o ambiente
+
 ===============================================================================
+
 Pré-requisitos:
 - Docker e Docker Compose instalados.
 
@@ -90,8 +108,11 @@ Pré-requisitos:
 - Postgres: host localhost, porta 5433 (mapeada), DB POSTGRES_DB.
 
 ===============================================================================
+
 Como o ETL funciona (passo a passo)
+
 ===============================================================================
+
 1. Login na API e guarda o token.
 2. Para cada placa ativa em cadastro.veiculo:
    - Busca no banco a última data_evento da placa.
@@ -115,8 +136,11 @@ também na ordem certa, garantindo que toda a operação contínua seja agrupada
 sessão com volume total e duração corretos, mesmo que o veículo tenha ficado sem sinal por um tempo.
 
 ===============================================================================
+
 Integração com Qlik
+
 ===============================================================================
+
 O script atual do Qlik pode continuar igual para:
 - cadastro.veiculo
 - rastreio.v_ultima_posicao (ou rastreio.vw_ultimas_posicoes_detalhe)
@@ -130,8 +154,11 @@ coleta/descarga, volume estimado em litros e início/fim:
 A view já traz duracao_seg calculado. Se quiser enriquecer no Qlik (formatações, buckets de duração etc.), faça no script do próprio Qlik.
 
 ===============================================================================
+
 Operação do dia a dia
+
 ===============================================================================
+
 - Ver logs do ETL:
     docker logs -f etl-bi-meio-ambiente
 
@@ -139,8 +166,11 @@ Operação do dia a dia
   Use o pgAdmin ou psql para reexecutar qualquer arquivo de db/init caso tenha feito alterações.
 
 ===============================================================================
+
 Dicas e solução de problemas
+
 ===============================================================================
+
 - “function ll_to_earth(...) does not exist”
   Certifique-se de que cube e earthdistance são criadas antes das tabelas/índices que as usam.
   Isso já é feito em 01_schemas.sql. Se você ressubiu parcialmente, rode:
@@ -159,8 +189,11 @@ Dicas e solução de problemas
   Tudo é gravado com TIMESTAMPTZ em UTC. Ajustes de exibição devem ser feitos no BI.
 
 ===============================================================================
-(OPTIONAL) Política de retenção
+
+Política de retenção
+
 ===============================================================================
+
 Se desejar limitar a tabela de posições por placa (ex.: manter somente os N registros mais recentes),
 é possível criar uma tarefa programada (cron/pgAgent) com SQL como:
 
@@ -175,8 +208,3 @@ Se desejar limitar a tabela de posições por placa (ex.: manter somente os N re
       AND r.rn > 8000;
 
 Atenção: retenção é opcional e não vem habilitada por padrão.
-
-===============================================================================
-Licença
-===============================================================================
-Defina a licença do seu projeto (MIT, Apache-2.0, etc.) conforme necessidade.
