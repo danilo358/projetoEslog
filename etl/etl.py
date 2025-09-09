@@ -18,7 +18,7 @@ load_dotenv()
 
 # ====================== Configs de ambiente ======================
 API_BASE_URL = os.getenv("API_BASE_URL")
-CLIENT_INTEGRATION_CODE = os.getenv("CLIENT_INTEGRATION_CODE")  # usado no body
+CLIENT_INTEGRATION_CODE = os.getenv("CLIENT_INTEGRATION_CODE")
 AUTH_LOGIN_PATH = os.getenv("AUTH_LOGIN_PATH")
 AUTH_USER = os.getenv("AUTH_USER")
 RADIUS_M = int(os.getenv("EVENT_RADIUS_METERS"))
@@ -26,7 +26,7 @@ COOLDOWN_MIN = os.getenv("EVENT_COOLDOWN_MIN")
 COOLDOWN_MIN = int(COOLDOWN_MIN) if (COOLDOWN_MIN not in (None, "")) else None
 AUTH_PASS = os.getenv("AUTH_PASS")
 AUTH_HASH = os.getenv("AUTH_HASH")
-GET_LAST_POSITIONS_PATH = os.getenv("GET_LAST_POSITIONS_PATH")  # /Controlws/HistoryPosition/List
+GET_LAST_POSITIONS_PATH = os.getenv("GET_LAST_POSITIONS_PATH")
 
 DB_HOST = os.getenv("DB_HOST", "postgres")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
@@ -35,7 +35,6 @@ DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
 API_PAGE_MAX = int(os.getenv("API_PAGE_MAX", "80000"))
 
-# IMPORTANTE: agora TOLERANCIA é um LIMIAR ABSOLUTO em pp (ex.: 10 = 10 pontos percentuais)
 TOLERANCIA = Decimal(os.getenv("TOLERANCIA_VARIACAO_PERCENT", "10"))
 FREQUENCIA = int(os.getenv("FREQUENCIA_SEGUNDOS", "300"))
 
@@ -92,7 +91,6 @@ def api_list_positions(placa: str, dt_ini: datetime, dt_fim: datetime, headers: 
         if placa in (tu, tiu):
             filtrados.append(it)
 
-    # Se parece que a API cortou a lista, fatiamos a janela
     if len(filtrados) >= API_PAGE_MAX and (dt_fim - dt_ini).total_seconds() > 1:
         meio = _midpoint(dt_ini, dt_fim)
         left  = api_list_positions(placa, dt_ini, meio, headers, url)
@@ -135,13 +133,11 @@ def janela_parada_ok(win: deque) -> bool:
     if (t_fim - t_ini).total_seconds() < OP_STATIONARY_MIN * 60:
         return False
 
-    # velocidade
     for p in win:
         v = p["vel"]
         if (v is not None) and (v > OP_IDLE_SPEED_KMH):
             return False
 
-    # deslocamento entre extremos
     d = haversine_m(win[0]["lat"], win[0]["lon"], win[-1]["lat"], win[-1]["lon"])
     return d <= OP_IDLE_RADIUS_M
 
@@ -222,7 +218,7 @@ def login():
         resp = requests.get(url, params=params, headers={"Accept": "application/json"}, timeout=30)
     elif method == "POST_FORM":
         resp = requests.post(url, data=params, headers={"Accept": "application/json"}, timeout=30)
-    else:  # POST_PARAMS
+    else:
         resp = requests.post(url, params=params, headers={"Accept": "application/json"}, timeout=30)
 
     if not (200 <= resp.status_code < 300):
