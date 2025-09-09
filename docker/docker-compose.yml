@@ -1,0 +1,64 @@
+version: "3.9"
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: pg-bi-meio-ambiente
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: America/Campo_Grande
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./db/data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin-bi-meio-ambiente
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      TZ: America/Campo_Grande
+    ports:
+      - "8081:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  etl:
+    build:
+      context: ../etl
+    container_name: etl-bi-meio-ambiente
+    environment:
+      API_BASE_URL: ${API_BASE_URL}
+      CLIENT_INTEGRATION_CODE: ${CLIENT_INTEGRATION_CODE}
+      AUTH_LOGIN_PATH: ${AUTH_LOGIN_PATH}
+      AUTH_USER: ${AUTH_USER}
+      AUTH_PASS: ${AUTH_PASS}
+      AUTH_HASH: ${AUTH_HASH}
+      GET_LAST_POSITIONS_PATH: ${GET_LAST_POSITIONS_PATH}
+      TOLERANCIA_VARIACAO_PERCENT: ${TOLERANCIA_VARIACAO_PERCENT}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASS: ${POSTGRES_PASSWORD}
+      FREQUENCIA_SEGUNDOS: ${FREQUENCIA_SEGUNDOS}
+      TZ: America/Campo_Grande
+      EVENT_RADIUS_METERS: ${EVENT_RADIUS_METERS}
+      EVENT_COOLDOWN_MIN: ${EVENT_COOLDOWN_MIN}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
