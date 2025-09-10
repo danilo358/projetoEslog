@@ -13,6 +13,7 @@ from decimal import Decimal
 from dotenv import load_dotenv
 import math
 from collections import deque
+from json.decoder import JSONDecodeError
 
 load_dotenv()
 
@@ -28,12 +29,13 @@ AUTH_PASS = os.getenv("AUTH_PASS")
 AUTH_HASH = os.getenv("AUTH_HASH")
 GET_LAST_POSITIONS_PATH = os.getenv("GET_LAST_POSITIONS_PATH")
 
+DATABASE_URL = os.getenv("DATABASE_URL")
 DB_HOST = os.getenv("DB_HOST", "postgres")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("DB_NAME", "bi_meio_ambiente")
 DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
-API_PAGE_MAX = int(os.getenv("API_PAGE_MAX", "80000"))
+API_PAGE_MAX = int(os.getenv("API_PAGE_MAX", "1000"))
 
 TOLERANCIA = Decimal(os.getenv("TOLERANCIA_VARIACAO_PERCENT", "10"))
 FREQUENCIA = int(os.getenv("FREQUENCIA_SEGUNDOS", "300"))
@@ -43,6 +45,8 @@ OP_STATIONARY_MIN = int(os.getenv("OP_STATIONARY_MIN", "2"))
 OP_MIN_SAMPLES    = int(os.getenv("OP_MIN_SAMPLES", "3"))
 OP_MIN_DURATION_SEC = int(os.getenv("OP_MIN_DURATION_SEC", "120"))
 OP_IDLE_RADIUS_M  = float(os.getenv("OP_IDLE_RADIUS_M", "30"))
+
+DEBUG_HTTP = os.getenv("DEBUG_HTTP", "0") == "1"
 
 # ====================== Logs ======================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -54,20 +58,25 @@ with open(os.path.join(os.path.dirname(__file__), "config.yml"), "r", encoding="
 # ====================== Utilitários ======================
 def obter_conexao():
     url = os.getenv("DATABASE_URL")
-    sslmode = os.getenv("DB_SSLMODE", None)
-
     if url:
-        # Se quiser forçar SSL mesmo sem querystring no URL:
-        # return psycopg2.connect(dsn=url, sslmode="require")
-        return psycopg2.connect(dsn=url)
+        return psycopg2.connect(dsn=url)  # sslmode já está na URL
+    return psycopg2.connect(..., sslmode=os.getenv("DB_SSLMODE", "require"))
 
-    kwargs = dict(
-        host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASS
+
+def _log_http_debug(resp, label="HTTP"):
+    if not DEBUG_HTTP:
+        return
+    ctype = (resp.headers.get("Content-Type") or "").lower()
+    body_preview = (resp.text or "")[:300].replace("\n", "\\n")
+    try:
+        req_body_len = len(resp.request.body) if resp.request and resp.request.body else 0
+    except Exception:
+        req_body_len = -1
+    logging.info(
+        f"{label} {resp.request.method} {resp.url} -> "
+        f"status={resp.status_code} ctype={ctype} "
+        f"req_len={req_body_len} resp_len={len(resp.content)} body^300={body_preview!r}"
     )
-    if sslmode:
-        kwargs["sslmode"] = sslmode  # ex.: 'require'
-    return psycopg2.connect(**kwargs)
-
 
 def _inicio_do_dia_utc() -> datetime:
     now = datetime.now(timezone.utc)
@@ -76,11 +85,15 @@ def _inicio_do_dia_utc() -> datetime:
 def _midpoint(a: datetime, b: datetime) -> datetime:
     return a + (b - a) / 2
 
+import re
+HTML_RE = re.compile(r"<(!DOCTYPE|html)", re.IGNORECASE)
+
 def api_list_positions(placa: str, dt_ini: datetime, dt_fim: datetime, headers: dict, url: str) -> list[dict]:
     """
     Busca histórico na janela [dt_ini, dt_fim].
-    Se vier 'grande' (>= API_PAGE_MAX), divide a janela ao meio e soma os resultados
-    para não perder páginas por corte da API.
+    Trata auth expirada (401/403), rate limit/5xx (retry/backoff),
+    204 (sem corpo), content-type não-JSON e JSON inválido.
+    Divide janela se bater API_PAGE_MAX.
     """
     body = {
         "TrackedUnitType": 1,
@@ -91,24 +104,84 @@ def api_list_positions(placa: str, dt_ini: datetime, dt_fim: datetime, headers: 
     if CLIENT_INTEGRATION_CODE:
         body["ClientIntegrationCode"] = str(CLIENT_INTEGRATION_CODE)
 
-    resp = requests.post(url, json=body, headers=headers, timeout=120)
-    resp.raise_for_status()
-    itens = resp.json() or []
+    # até 3 tentativas: reloga 1x em 401/403; backoff em 429/5xx
+    for tentativa in range(3):
+        resp = requests.post(url, json=body, headers=headers, timeout=120)
+        _log_http_debug(resp, label="SSX HistoryPosition")  # <-- DEBUG ANTES DO PARSE
+        # _dump_http(resp)  # se quiser ver dump completo
 
-    filtrados = []
-    for it in itens:
-        tu = str(it.get("TrackedUnit") or "").strip()
-        tiu = str(it.get("TrackedUnitIntegrationCode") or "").strip()
-        if placa in (tu, tiu):
-            filtrados.append(it)
+        # 401/403: token pode ter expirado -> reloga 1x
+        if resp.status_code in (401, 403) and tentativa == 0:
+            logging.warning("Auth possivelmente expirada; tentando relogar...")
+            try:
+                novo = login()
+                header_name = os.getenv("AUTH_HEADER_NAME", "Authorization")
+                header_tpl  = os.getenv("AUTH_HEADER_TEMPLATE", "Bearer {token}")
+                headers = {header_name: header_tpl.format(token=novo), "Accept": "application/json"}
+                continue  # refaz a tentativa com novo header
+            except Exception as e:
+                logging.exception(f"Falha ao relogar: {e}")
+                resp.raise_for_status()
 
-    if len(filtrados) >= API_PAGE_MAX and (dt_fim - dt_ini).total_seconds() > 1:
-        meio = _midpoint(dt_ini, dt_fim)
-        left  = api_list_positions(placa, dt_ini, meio, headers, url)
-        right = api_list_positions(placa, meio, dt_fim, headers, url)
-        return left + right
+        # 204: sem conteúdo
+        if resp.status_code == 204:
+            return []
 
-    return filtrados
+        # 429/5xx: retry simples com backoff
+        if resp.status_code in (429, 500, 502, 503, 504):
+            time.sleep(1 + tentativa)  # 1s, 2s...
+            continue
+
+        # fora de 2xx: logamos e levantamos
+        if not (200 <= resp.status_code < 300):
+            logging.error("API %s: %r", resp.status_code, (resp.text or "")[:300])
+            resp.raise_for_status()
+
+        # até aqui é 2xx; verifique conteúdo
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        txt = resp.text.strip() if resp.text is not None else ""
+
+        if not txt:
+            # 200 com corpo vazio -> trate como sem dados
+            logging.info("Resposta 2xx porém sem corpo; retornando lista vazia.")
+            return []
+
+        if "application/json" not in ctype:
+            # pode ser HTML de erro mesmo com 2xx/302 de gateway
+            if HTML_RE.match(txt):
+                logging.error("API retornou HTML em vez de JSON. Prefixo: %r", txt[:200])
+                return []
+            logging.warning("Content-Type inesperado: %r. Tentando parsear JSON assim mesmo.", ctype)
+
+        try:
+            itens = resp.json() or []
+        except JSONDecodeError:
+            logging.error("JSON inválido. Corpo (prefixo): %r", (resp.text or "")[:300])
+            if tentativa < 2:
+                time.sleep(1 + tentativa)
+                continue
+            return []
+
+        # filtra só a placa desejada
+        filtrados = []
+        for it in itens:
+            tu  = str(it.get("TrackedUnit") or "").strip()
+            tiu = str(it.get("TrackedUnitIntegrationCode") or "").strip()
+            if placa in (tu, tiu):
+                filtrados.append(it)
+
+        # se excedeu a janela/paginação, divide
+        if len(filtrados) >= API_PAGE_MAX and (dt_fim - dt_ini).total_seconds() > 1:
+            meio = _midpoint(dt_ini, dt_fim)
+            left  = api_list_positions(placa, dt_ini, meio, headers, url)
+            right = api_list_positions(placa, meio, dt_fim, headers, url)
+            return left + right
+
+        return filtrados
+
+    # se esgotaram as tentativas
+    return []
+
 
 
 def extrair_velocidade_kmh_do_row(row) -> float | None:
@@ -228,7 +301,7 @@ def login():
         resp = requests.get(url, params=params, headers={"Accept": "application/json"}, timeout=30)
     elif method == "POST_FORM":
         resp = requests.post(url, data=params, headers={"Accept": "application/json"}, timeout=30)
-    else:
+    else:  # POST_PARAMS
         resp = requests.post(url, params=params, headers={"Accept": "application/json"}, timeout=30)
 
     if not (200 <= resp.status_code < 300):
@@ -331,21 +404,23 @@ def inserir_evento_tanque(cur, placa, tipo, data_hora, lat, lon, variacao_pp, ni
     ))
 
 
+from psycopg2.extras import execute_values
+
 def inserir_posicoes(cur, linhas):
-    inseridas = []
-    for r in linhas:
-        cur.execute("""
-            INSERT INTO rastreio.posicao
-            (id_position, placa, id_event, ignicao, valid_gps, data_evento, data_atualizacao,
-             latitude, longitude, inputs, outputs, telemetria, nivel_tanque_percent, raw)
-            VALUES
-            (%(id_position)s, %(placa)s, %(id_event)s, %(ignicao)s, %(valid_gps)s, %(data_evento)s, %(data_atualizacao)s,
-             %(latitude)s, %(longitude)s, %(inputs)s, %(outputs)s, %(telemetria)s, %(nivel_tanque_percent)s, %(raw)s)
-            ON CONFLICT (id_position) DO NOTHING;
-        """, r)
-        if cur.rowcount == 1:
-            inseridas.append(r)
-    return inseridas
+    if not linhas:
+        return []
+    cols = ("id_position","placa","id_event","ignicao","valid_gps","data_evento",
+            "data_atualizacao","latitude","longitude","inputs","outputs",
+            "telemetria","nivel_tanque_percent","raw")
+    tpl = "(" + ",".join([f"%({c})s" for c in cols]) + ")"
+    sql = f"""
+        INSERT INTO rastreio.posicao ({",".join(cols)})
+        VALUES %s
+        ON CONFLICT (id_position) DO NOTHING;
+    """
+    execute_values(cur, sql, linhas, template=tpl, page_size=1000)
+    return linhas
+
 
 # ====================== ETL ======================
 def coletar_e_gravar():
@@ -363,30 +438,17 @@ def coletar_e_gravar():
         for placa in placas_validas:
             try:
                 dt_ultimo = obter_ultima_data_posicao(cur, placa)
-                if dt_ultimo is None:
-                    dt_ini = _inicio_do_dia_utc()
-                else:
-                    dt_ini = (dt_ultimo.astimezone(timezone.utc) if dt_ultimo.tzinfo else dt_ultimo.replace(tzinfo=timezone.utc)) + timedelta(milliseconds=1)
+                dt_ini = _inicio_do_dia_utc() if dt_ultimo is None else (
+                    (dt_ultimo.astimezone(timezone.utc) if dt_ultimo.tzinfo else dt_ultimo.replace(tzinfo=timezone.utc))
+                    + timedelta(milliseconds=1)
+                )
                 dt_fim = agora
                 if dt_ini >= dt_fim:
                     dt_ini = dt_fim - timedelta(seconds=1)
 
-                logging.info(f"[{placa}] janela { _to_iso_z(dt_ini) } -> { _to_iso_z(dt_fim) } (última no banco: {dt_ultimo})")
+                logging.info(f"[{placa}] janela {_to_iso_z(dt_ini)} -> {_to_iso_z(dt_fim)} (última no banco: {dt_ultimo})")
 
-                body = {
-                    "TrackedUnitType": 1,
-                    "TrackedUnitIntegrationCode": placa,
-                    "StartDatePosition": _to_iso_z(dt_ini),
-                    "EndDatePosition": _to_iso_z(dt_fim),
-                }
-                if CLIENT_INTEGRATION_CODE:
-                    body["ClientIntegrationCode"] = str(CLIENT_INTEGRATION_CODE)
-
-                resp = requests.post(url, json=body, headers=headers, timeout=120)
-                resp.raise_for_status()
-                itens = resp.json() or []
-                logging.info(f"[{placa}] janela { _to_iso_z(dt_ini) } -> { _to_iso_z(dt_fim) } (última no banco: {dt_ultimo})")
-
+                # >>>>>> CHAMADA ÚNICA (sem POST redundante)
                 itens = api_list_positions(placa, dt_ini, dt_fim, headers, url)
                 logging.info(f"[{placa}] posições retornadas pela API (após janela/poda): {len(itens)}")
 
@@ -416,7 +478,6 @@ def coletar_e_gravar():
                         "raw": json.dumps(item),
                     })
 
-
             except Exception as e:
                 logging.exception(f"Falha ao consultar histórico da placa {placa}: {e}")
 
@@ -424,13 +485,11 @@ def coletar_e_gravar():
             logging.info("Nenhuma posição retornada pelas consultas de histórico.")
             return
 
-        # --- Dedup no payload por (placa, id_position) ---
-        mapa = {}
-        for c in candidatos:
-            mapa[(c["placa"], c["id_position"])] = c
+        # --- Dedup por (placa, id_position) ---
+        mapa = {(c["placa"], c["id_position"]): c for c in candidatos}
         candidatos = list(mapa.values())
 
-        # --- Elimina os que já existem (pelo id_position, PK global) ---
+        # --- Elimina os que já existem ---
         ids_candidatos = [c["id_position"] for c in candidatos]
         existentes = carregar_ids_existentes(cur, ids_candidatos)
         linhas_novas = [c for c in candidatos if c["id_position"] not in existentes]
@@ -439,33 +498,30 @@ def coletar_e_gravar():
             logging.info("Nenhuma posição nova (todas já existem).")
             return
 
-        # --- Ordena por data_evento ASC (timezone-aware) antes de inserir ---
+        # --- Ordena por data_evento ASC ---
         linhas_novas.sort(key=lambda r: _parse_dt_any(r["data_evento"]))
 
         # --- Insere (na ordem) ---
         linhas_inseridas = inserir_posicoes(cur, linhas_novas)
-        
+
+        # --- Touch sessões tanque ---
         for r in linhas_inseridas:
             try:
                 cur.execute("""
                     SELECT operacao.touch_sessao_tanque(
-                        %s, %s, %s, %s, %s, %s, %s, %s
+                        %s,%s,%s,%s,%s,%s,%s,%s
                     );
                 """, (
-                    r["placa"],
-                    r["data_evento"],
+                    r["placa"], r["data_evento"],
                     r["latitude"], r["longitude"],
                     r["nivel_tanque_percent"],
                     r["id_position"],
-                    RADIUS_M,
-                    COOLDOWN_MIN or 30
+                    RADIUS_M, COOLDOWN_MIN or 30
                 ))
             except Exception as e:
                 logging.exception(f"touch_sessao_tanque falhou p/ {r['placa']} pos {r['id_position']}: {e}")
-        
-        logging.info(f"Posições novas inseridas: {len(linhas_inseridas)}")
 
-        # Log de novas por placa
+        logging.info(f"Posições novas inseridas: {len(linhas_inseridas)}")
         cont_por_placa = {}
         for r in linhas_inseridas:
             cont_por_placa[r["placa"]] = cont_por_placa.get(r["placa"], 0) + 1
@@ -474,35 +530,24 @@ def coletar_e_gravar():
 
         # ===== Geração de eventos de tanque =====
         eventos_criados = 0
-
-        # Agrupa por placa
         por_placa = {}
         for r in linhas_inseridas:
             por_placa.setdefault(r["placa"], []).append(r)
 
         for placa, lista in por_placa.items():
-            # ordem cronológica
             lista.sort(key=lambda r: _parse_dt_any(r["data_evento"]))
+            win = deque()
 
-            # janela deslizante com apenas pontos "recentes"
-            win = deque()  # cada item: {dt, lat, lon, nivel, vel, idp}
             for linha in lista:
                 dt = _parse_dt_any(linha["data_evento"])
                 vel = extrair_velocidade_kmh_do_row(linha)
-                pt = {
-                    "dt": dt,
-                    "lat": linha["latitude"],
-                    "lon": linha["longitude"],
-                    "nivel": linha["nivel_tanque_percent"],
-                    "vel": vel,
-                    "idp": linha["id_position"]
-                }
-                # avança janela: manter só últimos OP_STATIONARY_MIN minutos
+                pt = {"dt": dt, "lat": linha["latitude"], "lon": linha["longitude"],
+                      "nivel": linha["nivel_tanque_percent"], "vel": vel, "idp": linha["id_position"]}
+
                 win.append(pt)
                 while win and (dt - win[0]["dt"]).total_seconds() > OP_STATIONARY_MIN*60:
                     win.popleft()
 
-                # toca sessão com este ponto (se já existir), para ficar "EM ANDAMENTO"
                 try:
                     cur.execute("""
                         SELECT operacao.touch_sessao_tanque(
@@ -513,50 +558,29 @@ def coletar_e_gravar():
                         linha["latitude"], linha["longitude"],
                         linha["nivel_tanque_percent"],
                         linha["id_position"],
-                        RADIUS_M,
-                        COOLDOWN_MIN or 30
+                        RADIUS_M, COOLDOWN_MIN or 30
                     ))
                 except Exception as e:
                     logging.exception(f"touch_sessao_tanque falhou p/ {linha['placa']} pos {linha['id_position']}: {e}")
 
-                # Se JÁ existe sessão aberta e estamos tocando, ok; se NÃO existe, testamos abrir
-                # Abrir somente se: parado + variação sustentada >= TOLERANCIA
                 if janela_parada_ok(win):
                     diff = variacao_em_pp(win)
                     if diff is not None and abs(diff) >= TOLERANCIA:
                         tipo = "COLETA" if diff > 0 else "DESCARGA"
-                        # Usa o primeiro e o último ponto da janela como níveis
-                        # (o registrar_evento abre/estende sessão e grava o snapshot)
-                        nivel_ant = None
-                        for p in win:
-                            if p["nivel"] is not None:
-                                nivel_ant = Decimal(str(p["nivel"]))
-                                break
-                        nivel_atu = None
-                        for p in reversed(win):
-                            if p["nivel"] is not None:
-                                nivel_atu = Decimal(str(p["nivel"]))
-                                break
+                        # primeiro e último nível da janela
+                        nivel_ant = next((Decimal(str(p["nivel"])) for p in win if p["nivel"] is not None), None)
+                        nivel_atu = next((Decimal(str(p["nivel"])) for p in reversed(win) if p["nivel"] is not None), None)
 
-                        # escolhe o ponto atual como "origem" (id/coord/timestamp)
                         inserir_evento_tanque(
-                            cur,
-                            placa,
-                            tipo,
-                            linha["data_evento"],
+                            cur, placa, tipo, linha["data_evento"],
                             linha["latitude"], linha["longitude"],
-                            abs(diff),
-                            nivel_ant,
-                            nivel_atu,
-                            linha["id_position"]
+                            abs(diff), nivel_ant, nivel_atu, linha["id_position"]
                         )
                         eventos_criados += 1
 
-            # commit por placa: garante visibilidade imediata no BI das sessões ABERTAS
             conn.commit()
             logging.info(f"[{placa}] commit parcial (sessões atualizadas).")
 
-        # Fecha sessões "paradas" (sem touch recente) -> FECHADA ou DESCARTADA (qualificação no SQL)
         try:
             cur.execute("SELECT operacao.fechar_sessoes_stagnadas(%s);", (COOLDOWN_MIN or 30,))
         except Exception as e:
@@ -564,6 +588,7 @@ def coletar_e_gravar():
 
         conn.commit()
         logging.info(f"Eventos gerados neste ciclo: {eventos_criados}")
+
 
 # ====================== Loop ======================
 def loop():
