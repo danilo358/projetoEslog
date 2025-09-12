@@ -56,11 +56,22 @@ with open(os.path.join(os.path.dirname(__file__), "config.yml"), "r", encoding="
     CONFIG = yaml.safe_load(f)
 
 # ====================== Utilitários ======================
+import os
+import psycopg2
+
 def obter_conexao():
     url = os.getenv("DATABASE_URL")
     if url:
-        return psycopg2.connect(dsn=url)  # sslmode já está na URL
-    return psycopg2.connect(..., sslmode=os.getenv("DB_SSLMODE", "require"))
+        return psycopg2.connect(dsn=url)  # a URL já inclui sslmode
+
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST"),
+        port=os.getenv("DB_PORT", 5432),
+        dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASS"),
+        sslmode=os.getenv("DB_SSLMODE", "require")
+    )
 
 
 def _log_http_debug(resp, label="HTTP"):

@@ -41,3 +41,33 @@ WHERE u.rn = 1;
 
 CREATE OR REPLACE VIEW rastreio.vw_ultimas_posicoes_detalhe AS
 SELECT * FROM rastreio.v_ultima_posicao;
+
+CREATE OR REPLACE VIEW operacao.vw_sessoes_tanque_par AS
+SELECT
+  s.id_sessao,
+  s.placa,
+  s.tipo,
+  s.status,
+  s.inicio_data_hora,
+  s.fim_data_hora,
+
+  LEAST(s.inicio_data_hora, s.fim_data_hora)    AS hora_inicio_ord,
+  GREATEST(s.inicio_data_hora, s.fim_data_hora) AS hora_fim_ord,
+
+  -- Texto pronto para usar como dimensão
+  to_char(LEAST(s.inicio_data_hora, s.fim_data_hora), 'DD/MM/YYYY HH24:MI')
+  || ' → ' ||
+  to_char(GREATEST(s.inicio_data_hora, s.fim_data_hora), 'DD/MM/YYYY HH24:MI')
+  AS par_horario_ord,
+
+  -- Medidas: nível (%) e litros nos dois pontos
+  s.inicio_nivel                                AS nivel_inicio_percent,
+  s.fim_nivel                                   AS nivel_fim_percent,
+  s.capacidade_litros_snapshot                  AS capacidade_litros,
+  (s.capacidade_litros_snapshot * s.inicio_nivel / 100.0) AS litros_inicio,
+  (s.capacidade_litros_snapshot * s.fim_nivel    / 100.0) AS litros_fim,
+
+  -- Já existe no modelo, mas mantemos por conveniência
+  s.volume_estimado_l
+FROM operacao.sessao_tanque s
+WHERE s.status = 'FECHADA';
