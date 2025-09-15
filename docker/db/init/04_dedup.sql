@@ -109,6 +109,13 @@ BEGIN
     SELECT capacidade_tanque_litros INTO cap_l
       FROM cadastro.veiculo WHERE placa = p_placa;
 
+    -- Fechar sessões do tipo oposto que estejam abertas
+    UPDATE operacao.sessao_tanque
+       SET status = 'FECHADA', atualizado_em = now()
+     WHERE placa = p_placa 
+       AND tipo != p_tipo 
+       AND status = 'ABERTA';
+
     SELECT id_sessao, inicio_lat, inicio_lon, fim_data_hora
       INTO s_id, s_lat, s_lon, s_fim
       FROM operacao.sessao_tanque
@@ -334,5 +341,29 @@ BEGIN
   ON CONFLICT (origem_posicao) DO NOTHING;
 
   RETURN TRUE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION operacao.detectar_tipo_evento(
+    p_nivel_anterior numeric,
+    p_nivel_atual numeric,
+    p_tolerancia numeric DEFAULT 5
+)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+BEGIN
+    IF p_nivel_anterior IS NULL OR p_nivel_atual IS NULL THEN
+        RETURN NULL;
+    END IF;
+    
+    IF (p_nivel_atual - p_nivel_anterior) >= p_tolerancia THEN
+        RETURN 'COLETA';
+    ELSIF (p_nivel_anterior - p_nivel_atual) >= p_tolerancia THEN
+        RETURN 'DESCARGA';
+    ELSE
+        RETURN NULL;
+    END IF;
 END;
 $$;

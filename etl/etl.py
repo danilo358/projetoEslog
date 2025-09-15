@@ -48,9 +48,23 @@ OP_IDLE_RADIUS_M  = float(os.getenv("OP_IDLE_RADIUS_M", "30"))
 
 DEBUG_HTTP = os.getenv("DEBUG_HTTP", "0") == "1"
 
+DISABLE_EVENT_GUARDS = os.getenv("DISABLE_EVENT_GUARDS", "0")
+
+if DISABLE_EVENT_GUARDS:
+    # Afrouxa todos os limites pra DEV/simulação
+    RADIUS_M = 999_999
+    COOLDOWN_MIN = None   # ignora cooldown nos eventos do SQL
+    OP_IDLE_SPEED_KMH = 9_999
+    OP_STATIONARY_MIN = 0
+    OP_MIN_SAMPLES = 1
+    OP_MIN_DURATION_SEC = 0
+    OP_IDLE_RADIUS_M = 999_999
+    
+
+
 # ====================== Logs ======================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
+logging.warning("Modo DEV: guardas anti-duplicidade e janela de parada DESATIVADAS.")
 # ====================== Config YAML (mantido) ======================
 with open(os.path.join(os.path.dirname(__file__), "config.yml"), "r", encoding="utf-8") as f:
     CONFIG = yaml.safe_load(f)
@@ -61,16 +75,15 @@ import psycopg2
 
 def obter_conexao():
     url = os.getenv("DATABASE_URL")
-    if url:
-        return psycopg2.connect(dsn=url)  # a URL já inclui sslmode
-
+    if url and url.strip():
+        return psycopg2.connect(dsn=url)
     return psycopg2.connect(
         host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT", 5432),
+        port=os.getenv("DB_PORT", "5432"),
         dbname=os.getenv("DB_NAME"),
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASS"),
-        sslmode=os.getenv("DB_SSLMODE", "require")
+        sslmode=os.getenv("DB_SSLMODE", "require"),
     )
 
 
@@ -91,7 +104,7 @@ def _log_http_debug(resp, label="HTTP"):
 
 def _inicio_do_dia_utc() -> datetime:
     now = datetime.now(timezone.utc)
-    return datetime(now.year, now.month, 8, 0, 0, 0, tzinfo=timezone.utc)
+    return datetime(now.year, now.month, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 def _midpoint(a: datetime, b: datetime) -> datetime:
     return a + (b - a) / 2
@@ -222,6 +235,9 @@ def janela_parada_ok(win: deque) -> bool:
       - todas as velocidades conhecidas <= OP_IDLE_SPEED_KMH
       - deslocamento entre o 1º e o último ponto <= OP_IDLE_RADIUS_M
     """
+    if DISABLE_EVENT_GUARDS:
+        return True
+    
     if len(win) < OP_MIN_SAMPLES:
         return False
     t_ini = win[0]["dt"]; t_fim = win[-1]["dt"]
@@ -547,18 +563,49 @@ def coletar_e_gravar():
 
         for placa, lista in por_placa.items():
             lista.sort(key=lambda r: _parse_dt_any(r["data_evento"]))
-            win = deque()
-
-            for linha in lista:
+            
+            # Processar cada posição individualmente para detectar mudanças de tendência
+            for i, linha in enumerate(lista):
                 dt = _parse_dt_any(linha["data_evento"])
-                vel = extrair_velocidade_kmh_do_row(linha)
-                pt = {"dt": dt, "lat": linha["latitude"], "lon": linha["longitude"],
-                      "nivel": linha["nivel_tanque_percent"], "vel": vel, "idp": linha["id_position"]}
-
-                win.append(pt)
-                while win and (dt - win[0]["dt"]).total_seconds() > OP_STATIONARY_MIN*60:
-                    win.popleft()
-
+                nivel_atual = linha["nivel_tanque_percent"]
+                
+                if nivel_atual is None:
+                    continue
+                    
+                # Buscar nível anterior válido nos últimos pontos
+                nivel_anterior = None
+                for j in range(i-1, max(-1, i-10), -1):  # Busca nos últimos 10 pontos
+                    if lista[j]["nivel_tanque_percent"] is not None:
+                        nivel_anterior = lista[j]["nivel_tanque_percent"]
+                        break
+                
+                # Se não encontrou anterior nas posições atuais, busca no banco
+                if nivel_anterior is None:
+                    try:
+                        niveis_historicos = obter_ultimos_niveis_antes(cur, placa, linha["data_evento"], 5)
+                        if niveis_historicos:
+                            nivel_anterior = float(niveis_historicos[-1])
+                    except Exception:
+                        nivel_anterior = None
+                
+                # Detectar mudanças significativas
+                if nivel_anterior is not None:
+                    diff = Decimal(str(nivel_atual)) - Decimal(str(nivel_anterior))
+                    
+                    if abs(diff) >= TOLERANCIA:
+                        tipo = "COLETA" if diff > 0 else "DESCARGA"
+                        
+                        inserir_evento_tanque(
+                            cur, placa, tipo, linha["data_evento"],
+                            linha["latitude"], linha["longitude"],
+                            abs(diff), 
+                            Decimal(str(nivel_anterior)), 
+                            Decimal(str(nivel_atual)), 
+                            linha["id_position"]
+                        )
+                        eventos_criados += 1
+                
+                # Manter o touch_sessao_tanque para continuidade das sessões
                 try:
                     cur.execute("""
                         SELECT operacao.touch_sessao_tanque(
@@ -573,29 +620,12 @@ def coletar_e_gravar():
                     ))
                 except Exception as e:
                     logging.exception(f"touch_sessao_tanque falhou p/ {linha['placa']} pos {linha['id_position']}: {e}")
-
-                if janela_parada_ok(win):
-                    diff = variacao_em_pp(win)
-                    if diff is not None and abs(diff) >= TOLERANCIA:
-                        tipo = "COLETA" if diff > 0 else "DESCARGA"
-                        # primeiro e último nível da janela
-                        nivel_ant = next((Decimal(str(p["nivel"])) for p in win if p["nivel"] is not None), None)
-                        nivel_atu = next((Decimal(str(p["nivel"])) for p in reversed(win) if p["nivel"] is not None), None)
-
-                        inserir_evento_tanque(
-                            cur, placa, tipo, linha["data_evento"],
-                            linha["latitude"], linha["longitude"],
-                            abs(diff), nivel_ant, nivel_atu, linha["id_position"]
-                        )
-                        eventos_criados += 1
-
-            conn.commit()
-            logging.info(f"[{placa}] commit parcial (sessões atualizadas).")
-
-        try:
-            cur.execute("SELECT operacao.fechar_sessoes_stagnadas(%s);", (COOLDOWN_MIN or 30,))
-        except Exception as e:
-            logging.exception(f"fechar_sessoes_stagnadas falhou: {e}")
+            
+        if not DISABLE_EVENT_GUARDS:
+            try:
+                cur.execute("SELECT operacao.fechar_sessoes_stagnadas(%s);", (COOLDOWN_MIN or 30,))
+            except Exception as e:
+                logging.exception(f"fechar_sessoes_stagnadas falhou: {e}")
 
         conn.commit()
         logging.info(f"Eventos gerados neste ciclo: {eventos_criados}")

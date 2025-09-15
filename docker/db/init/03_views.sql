@@ -71,3 +71,49 @@ SELECT
   s.volume_estimado_l
 FROM operacao.sessao_tanque s
 WHERE s.status = 'FECHADA';
+
+CREATE OR REPLACE VIEW operacao.vw_painel_tanque AS
+/* Início das sessões (FECHADAS) */
+SELECT
+  s.inicio_pos_id              AS id_posicao,
+  s.placa,
+  v.empresa,
+  s.tipo::text                 AS tipo,
+  'Início'::text               AS ponto,
+  s.inicio_data_hora           AS horario,
+  s.volume_estimado_l          AS volume_estimado_l
+FROM operacao.sessao_tanque s
+JOIN cadastro.veiculo v USING (placa)
+WHERE s.status = 'FECHADA'
+
+UNION ALL
+/* Fim das sessões (FECHADAS) */
+SELECT
+  s.fim_pos_id                 AS id_posicao,
+  s.placa,
+  v.empresa,
+  s.tipo::text                 AS tipo,
+  'Fim'::text                  AS ponto,
+  s.fim_data_hora              AS horario,
+  s.volume_estimado_l          AS volume_estimado_l
+FROM operacao.sessao_tanque s
+JOIN cadastro.veiculo v USING (placa)
+WHERE s.status = 'FECHADA'
+  AND s.fim_pos_id IS NOT NULL
+
+UNION ALL
+/* Última posição (“Agora”) — 1 linha por placa */
+SELECT
+  u.id_position                AS id_posicao,
+  u.placa,
+  u.empresa,
+  NULL::text                   AS tipo,
+  'Agora'::text                AS ponto,
+  u.data_evento                AS horario,
+  CASE
+    WHEN u.capacidade_tanque_litros IS NOT NULL
+     AND u.nivel_tanque_percent IS NOT NULL
+      THEN u.capacidade_tanque_litros * (u.nivel_tanque_percent/100.0)
+    ELSE NULL
+  END                          AS volume_estimado_l
+FROM rastreio.v_ultima_posicao u;
