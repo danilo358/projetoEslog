@@ -1,4 +1,5 @@
 version: "3.9"
+
 services:
   postgres:
     image: postgis/postgis:16-3.4
@@ -9,8 +10,10 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       TZ: America/Campo_Grande
     ports:
+      # Porta externa 5433 -> interna 5432 (ok para acessar do host)
       - "5433:5432"
     volumes:
+      # Dados persistentes e scripts de init (.sql) rodam automaticamente
       - ./db/data:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
     restart: unless-stopped
@@ -36,10 +39,31 @@ services:
     restart: unless-stopped
 
   etl:
+    # Build do diretório do ETL (ajuste se o Dockerfile estiver em outro caminho)
     build:
       context: ../etl
     container_name: etl-bi-meio-ambiente
+
+    # Carrega variáveis do .env do ETL (mantém segredos e defaults)
+    env_file:
+      - ../etl/.env
+
+    # Overrides CRÍTICOS (garantem conexão correta e login da API mesmo que o .env esteja errado)
     environment:
+      # ===== Conexão ao Postgres na REDE do compose =====
+      # Dentro da rede do compose, o host é o NOME DO SERVIÇO "postgres" (não use localhost aqui).
+      # Forçamos sslmode=disable para evitar "server does not support SSL, but SSL was required".
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+
+      # Mantemos também as variáveis discretas (usadas se DATABASE_URL não estiver setada)
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASS: ${POSTGRES_PASSWORD}
+      DB_SSLMODE: disable
+
+      # ===== API Externa =====
       API_BASE_URL: ${API_BASE_URL}
       CLIENT_INTEGRATION_CODE: ${CLIENT_INTEGRATION_CODE}
       AUTH_LOGIN_PATH: ${AUTH_LOGIN_PATH}
@@ -47,16 +71,22 @@ services:
       AUTH_PASS: ${AUTH_PASS}
       AUTH_HASH: ${AUTH_HASH}
       GET_LAST_POSITIONS_PATH: ${GET_LAST_POSITIONS_PATH}
-      TOLERANCIA_VARIACAO_PERCENT: ${TOLERANCIA_VARIACAO_PERCENT}
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: ${POSTGRES_DB}
-      DB_USER: ${POSTGRES_USER}
-      DB_PASS: ${POSTGRES_PASSWORD}
-      FREQUENCIA_SEGUNDOS: ${FREQUENCIA_SEGUNDOS}
+
+      AUTH_QUERY_USER_KEY: ${AUTH_QUERY_USER_KEY}
+      AUTH_QUERY_PASS_KEY: ${AUTH_QUERY_PASS_KEY}
+      AUTH_QUERY_HASH_KEY: ${AUTH_QUERY_HASH_KEY}
+
+      # ===== Operação =====
+      FREQUENCIA_SEGUNDOS: ${FREQUENCIA_SEGUNDOS:-300}
+      API_PAGE_MAX: ${API_PAGE_MAX:-1000}
+      TOLERANCIA_VARIACAO_PERCENT: ${TOLERANCIA_VARIACAO_PERCENT:-10}
+      EVENT_RADIUS_METERS: ${EVENT_RADIUS_METERS:-50}
+      EVENT_COOLDOWN_MIN: ${EVENT_COOLDOWN_MIN:-30}
+      DEBUG_HTTP: ${DEBUG_HTTP:-0}
+      DISABLE_EVENT_GUARDS: ${DISABLE_EVENT_GUARDS:-0}
+
       TZ: America/Campo_Grande
-      EVENT_RADIUS_METERS: ${EVENT_RADIUS_METERS}
-      EVENT_COOLDOWN_MIN: ${EVENT_COOLDOWN_MIN}
+
     depends_on:
       postgres:
         condition: service_healthy
