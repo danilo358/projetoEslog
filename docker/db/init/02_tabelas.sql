@@ -32,25 +32,6 @@ CREATE INDEX IF NOT EXISTS idx_posicao_placa_evento
   CREATE INDEX IF NOT EXISTS idx_posicao_geom
   ON rastreio.posicao USING GIST (geom);
 
-CREATE TABLE IF NOT EXISTS operacao.evento_tanque (
-  id_evento         BIGSERIAL PRIMARY KEY,
-  placa             VARCHAR(64) NOT NULL,
-  tipo              VARCHAR(16) NOT NULL CHECK (tipo IN ('COLETA','DESCARGA')),
-  status            VARCHAR(16) NOT NULL CHECK (status IN ('EM_ANDAMENTO','FINALIZADO','DESCARTADO')),
-  inicio_em         TIMESTAMPTZ NOT NULL,
-  fim_em            TIMESTAMPTZ NULL,
-  nivel_inicio_pct  NUMERIC(6,3) NOT NULL,
-  nivel_fim_pct     NUMERIC(6,3) NULL,
-  volume_delta_l    NUMERIC(12,3) NULL,   -- litros efetivos (fim - início; sinal conforme o tipo)
-  lat_inicio        NUMERIC(10,6) NULL,
-  lon_inicio        NUMERIC(10,6) NULL,
-  lat_fim           NUMERIC(10,6) NULL,
-  lon_fim           NUMERIC(10,6) NULL,
-  origem            TEXT NOT NULL DEFAULT 'algoritmo_v2',
-  criado_em         TIMESTAMPTZ NOT NULL DEFAULT now(),
-  atualizado_em     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 -- Índices úteis
 CREATE INDEX IF NOT EXISTS evento_tanque_placa_idx ON operacao.evento_tanque(placa);
 CREATE INDEX IF NOT EXISTS evento_tanque_status_idx ON operacao.evento_tanque(status);

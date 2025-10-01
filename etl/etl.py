@@ -289,7 +289,7 @@ def detect_events_with_context(cur, placa, new_rows, lookback_minutes):
     
     # Combinar histórico + novos pontos
     all_rows = historical_rows + new_rows
-    all_rows.sort(key=lambda r: _naive_local["data_evento"])
+    all_rows.sort(key=lambda r: _naive_local(r["data_evento"]))
     
     logging.info(f"[{placa}] Detectando com contexto: {len(historical_rows)} históricos + {len(new_rows)} novos")
     
