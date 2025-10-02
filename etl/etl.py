@@ -328,9 +328,9 @@ def detect_events_by_trend(cur, placa, rows):
         logging.info(f"[{placa}] Retomando sessão existente {sid} ({tipo}) iniciada em {t0}")
         open_sess = {
             "id": sid, "placa": placa, "tipo": tipo,
-            "t0": t0,
+            "t0": _naive_local(t0),
             "nivel0": Decimal(str(nivel0)),
-            "last_touch_t": last_updated,
+            "last_touch_t": _naive_local(last_updated),
             "last_nivel": Decimal(str(last_nivel)) if last_nivel else Decimal(str(nivel0)),
             "point_count": 1,
             "last_unique_nv": Decimal(str(last_nivel)) if last_nivel else Decimal(str(nivel0)),
@@ -344,7 +344,7 @@ def detect_events_by_trend(cur, placa, rows):
             nv_raw = r.get("nivel_tanque_percent")
             nv = Decimal(str(nv_raw)) if nv_raw is not None and nv_raw > 0 else None
             return {
-                "t": r.get("data_evento"),
+                "t": _naive_local(r.get("data_evento")),
                 "nv": nv,
                 "lat": r.get("latitude"),
                 "lon": r.get("longitude"),
